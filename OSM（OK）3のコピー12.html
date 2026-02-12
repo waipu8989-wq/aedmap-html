@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>AEDマップ（安定完全版）</title>
+
+<style>
+#map{height:100vh;width:100%;}
+
+/* 表示切替 */
+#togglePanel{
+  position:absolute;
+  top:10px;left:10px;z-index:5;
+}
+#toggleContent{
+  display:none;background:#fff;padding:10px;
+  border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,0.3);
+  width:220px;
+}
+#toggleContent button{width:100%;margin-bottom:5px}
+
+/* 検索 */
+#searchPanel{
+  position:absolute;
+  bottom:10px;left:10px;z-index:5;
+}
+#searchContent{
+  display:none;background:#fff;padding:10px;
+  border-radius:10px;box-shadow:0 2px 6px rgba(0,0,0,0.3);
+  width:320px;
+}
+.searchRow{
+  display:flex;margin-bottom:6px;
+}
+.searchRow input{
+  flex:1;padding:6px;
+}
+.searchRow button{
+  width:60px;
+}
+
+#countInfo{
+  margin-top:8px;
+  font-size:13px;
+  white-space:pre-line;
+  font-weight:bold;
+}
+</style>
+</head>
+<body>
+
+<div id="togglePanel">
+<button onclick="toggleBox('toggleContent')">⚙ 表示切替</button>
+<div id="toggleContent">
+<button onclick="toggleAEDPin()">🔴 AEDピン</button>
+<button onclick="toggleAEDCircle()">🔴 AED円</button>
+<button onclick="toggleFacilityPin()">🟢 施設ピン</button>
+<button onclick="toggleFacilityCircle()">🟢 施設円</button>
+<button onclick="toggleOSMPin()">🔵 OSMピン</button>
+<button onclick="toggleOSMCircle()">🔵 OSM円</button>
+</div>
+</div>
+
+<div id="searchPanel">
+<button onclick="toggleBox('searchContent')">🔎 検索</button>
+<div id="searchContent">
+
+<div class="searchRow">
+<input id="facilityInput" placeholder="施設検索（例：コンビニ 青葉区中央）">
+<button onclick="facilitySearch()">検索</button>
+</div>
+
+<div class="searchRow">
+<input id="areaInput" placeholder="地域検索（例：青葉区中央）">
+<button onclick="areaSearch()">検索</button>
+</div>
+
+<div class="searchRow">
+<input id="osmInput" placeholder="OSM検索（例：医院）">
+<button onclick="searchOSM()">検索</button>
+</div>
+
+<div id="countInfo">地域を検索してください</div>
+
+</div>
+</div>
+
+<div id="map"></div>
+
+<script>
+
+let map;
+let AED_PINS=[],AED_CIRCLES=[];
+let FAC_PINS=[],FAC_CIRCLES=[];
+let OSM_PINS=[],OSM_CIRCLES=[];
+let AREA_RECT=null;
+let CURRENT_BOUNDS=null;
+
+let showAEDPin=true,showAEDCircle=true;
+let showFACPin=true,showFACCircle=true;
+let showOSMPin=true,showOSMCircle=true;
+
+function initMap(){
+
+const AED_DATA=[{lat:38.269922,lng:140.873957}];
+
+map=new google.maps.Map(document.getElementById("map"),{
+  zoom:13,
+  center:AED_DATA[0]
+});
+
+AED_DATA.forEach(loc=>{
+  AED_PINS.push(new google.maps.Marker({
+    position:loc,map,
+    icon:"http://maps.google.com/mapfiles/ms/icons/red-dot.png"
+  }));
+
+  AED_CIRCLES.push(new google.maps.Circle({
+    center:loc,radius:150,map,
+    fillColor:"#ff0000",fillOpacity:0.2,
+    strokeColor:"#ff0000",strokeWeight:2
+  }));
+});
+
+/* Autocomplete */
+new google.maps.places.Autocomplete(
+  document.getElementById("facilityInput"),
+  {componentRestrictions:{country:"jp"}}
+).bindTo("bounds",map);
+
+new google.maps.places.Autocomplete(
+  document.getElementById("areaInput"),
+  {componentRestrictions:{country:"jp"}}
+).bindTo("bounds",map);
+
+new google.maps.places.Autocomplete(
+  document.getElementById("osmInput"),
+  {componentRestrictions:{country:"jp"}}
+).bindTo("bounds",map);
+}
+
+/* ===== 地域検索（確実囲み） ===== */
+function areaSearch(){
+
+  const geocoder = new google.maps.Geocoder();
+  const address = document.getElementById("areaInput").value;
+  if(!address) return;
+
+  geocoder.geocode({ address: address, region:"jp" },function(results,status){
+
+    if(status!=="OK"||!results[0]){
+      alert("地域が見つかりません");
+      return;
+    }
+
+    const place = results[0];
+
+    // ★ Googleが検索判定に使う正確な範囲
+    const exactBounds =
+      place.geometry.bounds ||
+      place.geometry.viewport;
+
+    // ★ 判定はこれを使う（重要）
+    CURRENT_BOUNDS = exactBounds;
+
+    map.fitBounds(exactBounds);
+
+    if(AREA_RECT) AREA_RECT.setMap(null);
+
+    // ★ 表示用はざっくり拡張（見やすくする）
+    const sw = exactBounds.getSouthWest();
+    const ne = exactBounds.getNorthEast();
+
+    const visualBounds = new google.maps.LatLngBounds(
+      new google.maps.LatLng(sw.lat()-0.003, sw.lng()-0.003),
+      new google.maps.LatLng(ne.lat()+0.003, ne.lng()+0.003)
+    );
+
+    AREA_RECT = new google.maps.Rectangle({
+      bounds: visualBounds,
+      map: map,
+      strokeColor: "#008000",
+      strokeOpacity: 1,
+      strokeWeight: 4,
+      fillOpacity: 0
+    });
+
+    evaluateCoverage();
+  });
+
+  
+}
+
+/* ===== 施設検索 ===== */
+function facilitySearch(){
+clearSet(FAC_PINS,FAC_CIRCLES);
+const service=new google.maps.places.PlacesService(map);
+const query=document.getElementById("facilityInput").value;
+if(!query)return;
+
+service.textSearch({query:query},(results,status)=>{
+if(status!==google.maps.places.PlacesServiceStatus.OK)return;
+
+results.forEach(p=>{
+  const pos=p.geometry.location;
+
+  FAC_PINS.push(new google.maps.Marker({
+    position:pos,map:showFACPin?map:null,
+    icon:"http://maps.google.com/mapfiles/ms/icons/green-dot.png"
+  }));
+
+  FAC_CIRCLES.push(new google.maps.Circle({
+    center:pos,radius:150,
+    map:showFACCircle?map:null,
+    fillColor:"#00aa00",fillOpacity:0.15,
+    strokeWeight:0
+  }));
+});
+});
+}
+
+/* ===== OSM検索 ===== */
+async function searchOSM(){
+clearSet(OSM_PINS,OSM_CIRCLES);
+const word=document.getElementById("osmInput").value;
+if(!word)return;
+
+const query=`
+[out:json][timeout:60];
+node["name"~"${word}"](38.2,140.7,38.41,140.96);
+out;
+`;
+
+const res=await fetch("https://overpass-api.de/api/interpreter",
+{method:"POST",body:query});
+const data=await res.json();
+
+data.elements.forEach(el=>{
+const pos={lat:el.lat,lng:el.lon};
+
+OSM_PINS.push(new google.maps.Marker({
+position:pos,
+map:showOSMPin?map:null,
+icon:"http://maps.google.com/mapfiles/ms/icons/blue-dot.png"
+}));
+
+OSM_CIRCLES.push(new google.maps.Circle({
+center:pos,radius:150,
+map:showOSMCircle?map:null,
+fillColor:"#0000ff",fillOpacity:0.15,
+strokeWeight:0
+}));
+});
+}
+
+/* ===== 有効判定 ===== */
+function evaluateCoverage(){
+if(!CURRENT_BOUNDS) return;
+
+let facTotal=0, osmTotal=0;
+let total=0, one=0, two=0, three=0;
+
+// ===== 重複除去用 =====
+const facMap=new Map();
+const osmMap=new Map();
+
+// ---------- FAC（Google） ----------
+FAC_PINS.forEach(f=>{
+  const pos=f.getPosition();
+  if(!CURRENT_BOUNDS.contains(pos)) return;
+
+  const key=pos.lat().toFixed(6)+","+pos.lng().toFixed(6);
+  if(facMap.has(key)) return;
+
+  facMap.set(key,f);
+});
+
+// ---------- OSM ----------
+OSM_PINS.forEach(f=>{
+  const pos=f.getPosition();
+  if(!CURRENT_BOUNDS.contains(pos)) return;
+
+  const key=pos.lat().toFixed(6)+","+pos.lng().toFixed(6);
+  if(osmMap.has(key)) return;
+
+  osmMap.set(key,f);
+});
+
+facTotal = facMap.size;
+osmTotal = osmMap.size;
+
+// ===== 合計評価（FAC+OSM）=====
+const merged = new Map([...facMap, ...osmMap]);
+
+merged.forEach(f=>{
+  total++;
+
+  let dmin=Infinity;
+
+  AED_PINS.forEach(a=>{
+    const d=google.maps.geometry.spherical.computeDistanceBetween(
+      f.getPosition(),a.getPosition()
+    );
+    if(d<dmin) dmin=d;
+  });
+
+  if(dmin<=150) one++;
+  else if(dmin<=300) two++;
+  else three++;
+});
+
+document.getElementById("countInfo").innerText=
+`【Google施設】${facTotal}
+【OSM施設】${osmTotal}
+--------------------
+地域内施設総数:${total}
+① AED150m圏内:${one}
+② 円重複型(150〜300m):${two}
+③ 完全空白型(300m超):${three}`;
+}
+
+/* ===== ON/OFF ===== */
+function toggleAEDPin(){showAEDPin=!showAEDPin;AED_PINS.forEach(p=>p.setMap(showAEDPin?map:null));}
+function toggleAEDCircle(){showAEDCircle=!showAEDCircle;AED_CIRCLES.forEach(c=>c.setMap(showAEDCircle?map:null));}
+function toggleFacilityPin(){showFACPin=!showFACPin;FAC_PINS.forEach(p=>p.setMap(showFACPin?map:null));}
+function toggleFacilityCircle(){showFACCircle=!showFACCircle;FAC_CIRCLES.forEach(c=>c.setMap(showFACCircle?map:null));}
+function toggleOSMPin(){showOSMPin=!showOSMPin;OSM_PINS.forEach(p=>p.setMap(showOSMPin?map:null));}
+function toggleOSMCircle(){showOSMCircle=!showOSMCircle;OSM_CIRCLES.forEach(c=>c.setMap(showOSMCircle?map:null));}
+
+function toggleBox(id){
+const el=document.getElementById(id);
+el.style.display=el.style.display==="none"?"block":"none";
+}
+
+function clearSet(p,c){
+p.forEach(x=>x.setMap(null));
+c.forEach(x=>x.setMap(null));
+p.length=0;c.length=0;
+}
+
+</script>
+
+<!-- 必須：places + geometry -->
+
+<script
+  src="https://maps.googleapis.com/maps/api/js?key=AIzaSyAS1kg0EmsFnpUU4Av3PcSCSQV0kPDyQBA&libraries=places,geometry&callback=initMap"
+  async defer>
+</script>
+
+</body>
+</html>
